@@ -43,7 +43,7 @@ def get_nearby_stops():
     stops = response.json().get('stops', [])
     formatted_stops = [
         {
-            'distance': stop['distance'],
+            'distance': stop['distance'],   
             'global_stop_id': stop['global_stop_id'],
             'stop_name': stop['stop_name']
         }
@@ -78,15 +78,7 @@ def get_stop_departure():
     # Filter and format the response
     route_departures = response.json().get('route_departures', [])
     formatted_stops = []
-    # formatted_stops = [
-    #     {
-    #         'route_short_name': route_departure['route_short_name'],
-    #         #'headsign' : route_departure['iteneraries']['headsign'],
-    #         'global_route_id' : route_departure['global_route_id']
-    #     }
-    #     for route_departure in route_departures
-    # ]
-
+    
     for route_departure in route_departures:
         # Loop through each itinerary in the route_departure
         for itinerary in route_departure.get('itineraries', []):
@@ -165,53 +157,11 @@ def fetch_places(lat,lon):
     response = requests.get(base_url, params=params)
     return response.json()
 
-
-
-
-# @app.route('/reverse_search')
-# def reverse_search():
-#     dest_lat = request.args.get('dest_lat')
-#     dest_lon = request.args.get('dest_lon')
-#     source_lat = request.args.get('source_lat')
-#     source_lon = request.args.get('source_lon')
-
-#     # Fetch nearby stops for both the source and destination
-#     source_stops = get_nearby_stops_direct(source_lat, source_lon)
-#     dest_stops = get_nearby_stops_direct(dest_lat, dest_lon)
-
-#     possible_routes = []
-
-#     # Iterate over each source and destination stop pair
-#     for source_stop in source_stops:
-#         source_route_ids = get_global_route_ids(source_stop['global_stop_id'])
-#         logging.debug(f"source_route_ids: {source_route_ids} source_stop {source_stop['global_stop_id']}")
-#         for dest_stop in dest_stops:
-#             dest_route_ids = get_global_route_ids(dest_stop['global_stop_id'])
-#             logging.debug(f"dest_route_ids: {dest_route_ids}")
-#             # Find intersection of route IDs from source and destination
-#             common_route_ids = list(set(source_route_ids).intersection(dest_route_ids))
-#             # Fetch details for each common route ID
-#             for route_id in common_route_ids:
-#                 route_stops = fetch_route_stops(route_id)
-
-#                 # Determine if source comes before destination and filter the stops accordingly
-#                 source_index = next((i for i, stop in enumerate(route_stops) if stop['global_stop_id'] == source_stop['global_stop_id']), -1)
-#                 dest_index = next((i for i, stop in enumerate(route_stops) if stop['global_stop_id'] == dest_stop['global_stop_id']), -1)
-
-#                 if source_index != -1 and dest_index != -1 and source_index < dest_index:
-#                     filtered_stops = route_stops[source_index:dest_index + 1]
-#                     possible_routes.append({
-#                         'route_id': route_id,
-#                         'source_stop_id': source_stop['global_stop_id'],
-#                         'destination_stop_id': dest_stop['global_stop_id'],
-#                         'stops': filtered_stops
-#                     })
-
-#     return jsonify(possible_routes)
-
-#@lru_cache(maxsize=128) 
-def throttled_request(url, headers, params, max_retries=5):
-    delay = 1  # Initial delay in seconds between retries
+@lru_cache(maxsize=128)
+def throttled_request(url, headers_tuple, params_tuple, max_retries=5):
+    headers = dict(headers_tuple)  # Convert tuple back to dict
+    params = dict(params_tuple)  # Convert tuple back to dict
+    delay = 1
     for attempt in range(max_retries):
         response = requests.get(url, headers=headers, params=params)
         if response.status_code == 200:
@@ -220,8 +170,8 @@ def throttled_request(url, headers, params, max_retries=5):
             time.sleep(delay)
             delay *= 2  # Exponential backoff
         else:
-            break  # Break the loop if other HTTP errors occur
-    return None  # Return None if all retries fail
+            break
+    return None
 
 @app.route('/reverse_search')
 def reverse_search():
@@ -234,30 +184,30 @@ def reverse_search():
     source_stops = get_nearby_stops_direct(source_lat, source_lon)
     dest_stops = get_nearby_stops_direct(dest_lat, dest_lon)
 
-    # Cache for destination route IDs
+    # Cache for destination route IDs with additional information
     dest_route_ids_cache = {}
 
-    # Collect all route IDs for destination stops only once
+    # Collect all route IDs and additional information for destination stops only once
     for dest_stop in dest_stops:
         dest_route_ids_cache[dest_stop['global_stop_id']] = get_global_route_ids(dest_stop['global_stop_id'])
 
-    logging.debug(f"dest_route_ids_cache: {dest_route_ids_cache}")
     possible_routes = []
 
     # Iterate over each source and use cached destination route IDs
     for source_stop in source_stops:
-        source_route_ids = get_global_route_ids(source_stop['global_stop_id'])
-        logging.debug(f"source_route_ids: {source_route_ids}")
+        source_route_info = get_global_route_ids(source_stop['global_stop_id'])
         for dest_stop in dest_stops:
-            dest_route_ids = dest_route_ids_cache[dest_stop['global_stop_id']]
+            dest_route_info = dest_route_ids_cache[dest_stop['global_stop_id']]
+            source_route_ids = {info['global_route_id']: info for info in source_route_info}
+            dest_route_ids = {info['global_route_id']: info for info in dest_route_info}
 
-            # Find intersection of route IDs    from source and destination
-            common_route_ids = list(set(source_route_ids).intersection(dest_route_ids))
-            logging.debug(f"common_route_ids: {common_route_ids}")
+            # Find intersection of route IDs from source and destination
+            common_route_ids = set(source_route_ids.keys()).intersection(dest_route_ids.keys())
+
             # Fetch details for each common route ID
             for route_id in common_route_ids:
+                logging.debug(f"common route id {route_id}")
                 route_stops = fetch_route_stops(route_id)
-
                 # Determine if source comes before destination and filter the stops accordingly
                 source_index = next((i for i, stop in enumerate(route_stops) if stop['global_stop_id'] == source_stop['global_stop_id']), -1)
                 dest_index = next((i for i, stop in enumerate(route_stops) if stop['global_stop_id'] == dest_stop['global_stop_id']), -1)
@@ -268,6 +218,8 @@ def reverse_search():
                         'route_id': route_id,
                         'source_stop_id': source_stop['global_stop_id'],
                         'destination_stop_id': dest_stop['global_stop_id'],
+                        'route_short_name': source_route_ids[route_id]['route_short_name'],
+                        'headsign': source_route_ids[route_id]['headsign'],
                         'stops': filtered_stops
                     })
 
@@ -294,31 +246,39 @@ def get_nearby_stops_direct(lat, lon):
         for stop in stops
     ]
 
-#@lru_cache(maxsize=128)
+@lru_cache(maxsize=128)
 def get_global_route_ids(global_stop_id):
     URL = 'https://external.transitapp.com/v3/public/stop_departures'
-    params = {'global_stop_id': global_stop_id}
     headers = {'apiKey': API_KEY}
-    response = throttled_request(URL, headers, params)
-    #response = requests.get(URL, headers=headers, params=params)
-    
-    if response:  # Check if the response is not None
+    params = {'global_stop_id': global_stop_id}
+    headers_tuple = tuple(sorted(headers.items()))
+    params_tuple = tuple(sorted(params.items()))
+    response = throttled_request(URL, headers_tuple, params_tuple)
+    if response:
         route_departures = response.get('route_departures', [])
-        global_route_ids = [departure['global_route_id'] for departure in route_departures]
-        return global_route_ids
-    return []  # Return an empty list if the request failed
+        return [
+            {
+                'global_route_id': departure['global_route_id'],
+                'route_short_name': departure['route_short_name'],
+                'headsign': departure.get('itineraries', [])[0]['headsign'] if departure.get('itineraries') else ""
+            }
+            for departure in route_departures
+        ]
+    return []
 
+
+@lru_cache(maxsize=128)
 def fetch_route_stops(global_route_id):
     URL = 'https://external.transitapp.com/v3/public/route_details'
-    params = {'global_route_id': global_route_id}
     headers = {'apiKey': API_KEY}
-    #response = requests.get(URL, headers=headers, params=params)
-    response = throttled_request(URL, headers, params)
-    if response:  # Check if the response is not None
+    params = {'global_route_id': global_route_id}
+    headers_tuple = tuple(sorted(headers.items()))
+    params_tuple = tuple(sorted(params.items()))
+    response = throttled_request(URL, headers_tuple, params_tuple)
+    if response:
         route_details = response.get('itineraries', [])
-        stops = []
         if route_details and 'stops' in route_details[0]:
-            stops = [
+            return [
                 {
                     'global_stop_id': stop['global_stop_id'],
                     'stop_name': stop['stop_name'],
@@ -327,8 +287,40 @@ def fetch_route_stops(global_route_id):
                 }
                 for stop in route_details[0]['stops']
             ]
-        return stops
-    return []  # Return an empty list if the request failed
+    return []
+
+@app.route('/search_places')
+def search_places():
+    lat = request.args.get('lat')
+    lon = request.args.get('lon')
+    keyword = request.args.get('keyword')
+
+    # Construct the Google Places API URL
+    base_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+    params = {
+        'location': f'{lat},{lon}',
+        'radius': '5000',  # Search within 5km radius
+        'keyword': keyword,
+        'key': 'AIzaSyD-u2cMuvQo2_yBphtFc5dbxJ4MBVPO2BI'
+    }
+
+    # Make the API request to Google Places
+    response = requests.get(base_url, params=params)
+    places = response.json()
+
+    # Extract the relevant information to return
+    results = []
+    if 'results' in places:
+        for place in places['results']:
+            result = {
+                'name': place['name'],
+                'address': place.get('vicinity'),
+                'latitude': place['geometry']['location']['lat'],
+                'longitude': place['geometry']['location']['lng']
+            }
+            results.append(result)
+
+    return jsonify(results)
 
 
 if __name__ == '__main__':
