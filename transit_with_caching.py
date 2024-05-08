@@ -1,10 +1,19 @@
 from flask import Flask, request, jsonify
 import requests
 import logging
+from pymongo import MongoClient
 from functools import lru_cache
+from bson.json_util import dumps
+import hashlib
 import time
 
 app = Flask(__name__)
+
+
+# MongoDB setup
+client = MongoClient('localhost', 27017)  # Connect to your MongoDB server
+db = client.places_cache  # Use or create a database called 'places_cache'
+collection = db.places  # Use or create a collection within the database
 
 # Enable logging
 logging.basicConfig(level=logging.DEBUG)
@@ -172,16 +181,36 @@ def throttled_request(url, headers_tuple, params_tuple, max_retries=5):
             break
     return None
 
+def round_coordinates(lat, lon, precision=4):
+    """ Round the coordinates to a specified precision to create geospatial bins. """
+    # The precision defines the number of decimal places, e.g., 4 decimal places ~ 11 meters
+    return round(lat, precision), round(lon, precision)
+
+reverse_search_collection = db.reverse_search_cache 
 @app.route('/reverse_search')
 def reverse_search():
-    dest_lat = request.args.get('dest_lat')
-    dest_lon = request.args.get('dest_lon')
-    source_lat = request.args.get('source_lat')
-    source_lon = request.args.get('source_lon')
+    dest_lat = float(request.args.get('dest_lat'))
+    dest_lon = float(request.args.get('dest_lon'))
+    source_lat = float(request.args.get('source_lat'))
+    source_lon = float(request.args.get('source_lon'))
 
+    dest_lat, dest_lon = round_coordinates(dest_lat, dest_lon)
+    source_lat, source_lon = round_coordinates(source_lat, source_lon)
+
+    unique_key = f"{dest_lat}_{dest_lon}_{source_lat}_{source_lon}"
+    hashed_key = hashlib.sha256(unique_key.encode()).hexdigest()
+
+    cached_data = reverse_search_collection.find_one({'_id': hashed_key})
+    if cached_data:
+        logging.debug("Returning cached data")
+        return jsonify(cached_data['data'])
+
+    logging.debug("Data not found in cache, fetching new data")
+    
     # Fetch nearby stops for both the source and destination
     source_stops = get_nearby_stops_direct(source_lat, source_lon)
     dest_stops = get_nearby_stops_direct(dest_lat, dest_lon)
+
 
     # Cache for destination route IDs with additional information
     dest_route_ids_cache = {}
@@ -222,6 +251,14 @@ def reverse_search():
                         'stops': filtered_stops
                     })
 
+    # Store the new data in the cache
+    if possible_routes:
+        reverse_search_collection.insert_one({'_id': hashed_key, 'data': possible_routes})
+        logging.debug("Data cached for future use")
+    else:
+        logging.debug("No data to cache; response is empty.")
+
+    
     return jsonify(possible_routes)
 
 
@@ -288,11 +325,20 @@ def fetch_route_stops(global_route_id):
             ]
     return []
 
+search_places_collection = db.search_places_cache 
 @app.route('/search_places')
 def search_places():
     lat = request.args.get('lat')
     lon = request.args.get('lon')
     keyword = request.args.get('keyword')
+
+    hash_key = hashlib.sha256(f"{lat}{lon}{keyword}".encode()).hexdigest()
+
+    cached_result = search_places_collection.find_one({'_id': hash_key})
+
+    if cached_result:
+        # Return the cached result if it exists
+        return jsonify(cached_result['data'])
 
     # Construct the Google Places API URL
     base_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
@@ -318,6 +364,15 @@ def search_places():
                 'longitude': place['geometry']['location']['lng']
             }
             results.append(result)
+    
+    # Cache the result in MongoDB
+    if results:
+        search_places_collection.insert_one({
+            '_id': hash_key,
+            'data': results
+        })
+        logging.debug("Data cached in search_places_cache for future use")
+    
 
     return jsonify(results)
 
