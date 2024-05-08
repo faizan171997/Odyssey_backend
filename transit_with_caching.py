@@ -104,12 +104,24 @@ def get_stop_departure():
     # Return the filtered and formatted response
     return jsonify(formatted_stops)
 
+places_collection = db.places_cache
 
 @app.route('/places')
 def get_places_for_a_bus():
     global_route_id=request.args.get('global_route_id')
     headsign=request.args.get('headsign')
     global_stop_id=request.args.get('global_stop_id')
+
+    unique_key = f"{global_route_id}_{headsign}_{global_stop_id}"
+    hashed_key = hashlib.sha256(unique_key.encode()).hexdigest()
+
+    cached_data = places_collection.find_one({'_id': hashed_key})
+    if cached_data:
+        logging.debug("Returning cached data")
+        return jsonify(cached_data['data'])
+
+    logging.debug("Data not found in cache, fetching new data")
+
     flag = False
     base_url = "https://external.transitapp.com/v3/public/route_details"
     headers = {'apiKey': API_KEY}
@@ -132,20 +144,25 @@ def get_places_for_a_bus():
                     continue
                 lat=stop['stop_lat']
                 lon=stop['stop_lon']
-                nearest_stop_name=stop['stop_name']
+                stop_info = {
+                        'name': stop['stop_name'],
+                        'id': stop['global_stop_id']
+                }
                 places=fetch_places(lat,lon)
                 for place in places.get('results', []):
                     place_lat = place.get('geometry', {}).get('location', {}).get('lat')
                     place_lng = place.get('geometry', {}).get('location', {}).get('lng')
                     formatted_place = {
                         'name': place.get('name'),
-                        'nearest_stop': nearest_stop_name,
+                        'stop': stop_info,
                         'type': place.get('types', []),  # Assuming you want the first two types
                         'rating': place.get('rating', None),
                         'latitude': place_lat,
                         'longitude': place_lng
                     }
                     formatted_places.append(formatted_place)
+            places_collection.insert_one({'_id': hashed_key, 'data': formatted_places})
+            logging.debug("Data cached for future use")
             return jsonify(formatted_places)
     return jsonify({'message': 'No places found for the specified route and headsign'})
 
@@ -166,7 +183,7 @@ def fetch_places(lat,lon):
     return response.json()
 
 @lru_cache(maxsize=128)
-def throttled_request(url, headers_tuple, params_tuple, max_retries=5):
+def throttled_request(url, headers_tuple, params_tuple, max_retries=10):
     headers = dict(headers_tuple)  # Convert tuple back to dict
     params = dict(params_tuple)  # Convert tuple back to dict
     delay = 1
@@ -219,7 +236,7 @@ def reverse_search():
     for dest_stop in dest_stops:
         dest_route_ids_cache[dest_stop['global_stop_id']] = get_global_route_ids(dest_stop['global_stop_id'])
 
-    possible_routes = []
+    longest_routes = {}
 
     # Iterate over each source and use cached destination route IDs
     for source_stop in source_stops:
@@ -239,27 +256,45 @@ def reverse_search():
                 # Determine if source comes before destination and filter the stops accordingly
                 source_index = next((i for i, stop in enumerate(route_stops) if stop['global_stop_id'] == source_stop['global_stop_id']), -1)
                 dest_index = next((i for i, stop in enumerate(route_stops) if stop['global_stop_id'] == dest_stop['global_stop_id']), -1)
-
                 if source_index != -1 and dest_index != -1 and source_index < dest_index:
                     filtered_stops = route_stops[source_index:dest_index + 1]
-                    possible_routes.append({
-                        'route_id': route_id,
-                        'source_stop_id': source_stop['global_stop_id'],
-                        'destination_stop_id': dest_stop['global_stop_id'],
-                        'route_short_name': source_route_ids[route_id]['route_short_name'],
-                        'headsign': source_route_ids[route_id]['headsign'],
-                        'stops': filtered_stops
-                    })
+                    route_length = len(filtered_stops)
+                    if route_id not in longest_routes or route_length > len(longest_routes[route_id]['stops']):
+                        longest_routes[route_id] = {
+                            'route_id': route_id,
+                            'source_stop_id': source_stop['global_stop_id'],
+                            'destination_stop_id': dest_stop['global_stop_id'],
+                            'route_short_name': source_route_ids[route_id]['route_short_name'],
+                            'headsign': source_route_ids[route_id]['headsign'],
+                            'stops': filtered_stops  # Keeping this line for now to gather places later
+                        }
 
-    # Store the new data in the cache
-    if possible_routes:
-        reverse_search_collection.insert_one({'_id': hashed_key, 'data': possible_routes})
+    if longest_routes:
+        logging.debug(f"longest_routes {longest_routes}")
+        # Fetch places for each stop in the longest routes
+        for route_id, route_info in longest_routes.items():
+            places_results = []
+            for stop in route_info['stops']:  # Using stops to find places
+                places = fetch_places(stop['stop_lat'], stop['stop_lon'])
+                for place in places.get('results', []):
+                    place_details = {
+                        'name': place['name'],
+                        'nearest_stop': stop['stop_name'],
+                        'type': place.get('types', []),
+                        'rating': place.get('rating', None),
+                        'latitude': place['geometry']['location']['lat'],
+                        'longitude': place['geometry']['location']['lng']
+                    }
+                    places_results.append(place_details)
+            route_info['places'] = places_results
+            del route_info['stops']  # Remove stops from final output as requested
+
+        reverse_search_collection.insert_one({'_id': hashed_key, 'data': list(longest_routes.values())})
         logging.debug("Data cached for future use")
+        return jsonify(list(longest_routes.values()))
     else:
         logging.debug("No data to cache; response is empty.")
-
-    
-    return jsonify(possible_routes)
+        return jsonify({'message': 'No routes found meeting the criteria'})
 
 
 
@@ -378,6 +413,6 @@ def search_places():
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0',port=50001, debug=True)
 
 
